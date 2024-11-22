@@ -13,7 +13,7 @@ pub const MIN_NON_LITERAL_BLOCK_SIZE: usize = 1 + 1 + INPUT_MARGIN;
 const Block = struct {
     src: []const u8,
     src_cursor: usize,
-    s_limit: usize,
+    src_limit: usize,
     dest: [*]u8,
     dest_cursor: usize,
     next_emit: usize,
@@ -23,7 +23,7 @@ pub fn new_block(src: []const u8, dst: [*]u8, d: usize) Block {
     return Block{
         .src = src,
         .src_cursor = 0,
-        .s_limit = src.len,
+        .src_limit = src.len,
         .dest = dst,
         .dest_cursor = d,
         .next_emit = 0,
@@ -34,7 +34,7 @@ pub fn compress(self: *Block, table: block_table.BlockTable) void {
     assert(self.src.len >= MIN_NON_LITERAL_BLOCK_SIZE);
 
     self.src_cursor += 1;
-    self.s_limit -= INPUT_MARGIN;
+    self.src_limit -= INPUT_MARGIN;
 
     var next_hash =
         table.hash(bytes.load_32(self.src, self.src_cursor));
@@ -50,7 +50,7 @@ pub fn compress(self: *Block, table: block_table.BlockTable) void {
             s_next = self.src_cursor + bytes_between_hash_lookups;
             skip += bytes_between_hash_lookups;
 
-            if (s_next > self.s_limit) {
+            if (s_next > self.src_limit) {
                 return done(self);
             }
 
@@ -62,9 +62,9 @@ pub fn compress(self: *Block, table: block_table.BlockTable) void {
                 next_hash = table.hash(x);
 
                 const cur = bytes.load_32(self.src, self.src_cursor);
-                const cand = bytes.load_32(self.src, candidate);
+                const next_candidate = bytes.load_32(self.src, candidate);
 
-                if (cur == cand) {
+                if (cur == next_candidate) {
                     break;
                 }
             }
@@ -93,7 +93,7 @@ pub fn compress(self: *Block, table: block_table.BlockTable) void {
 
             self.next_emit = self.src_cursor;
 
-            if (self.src_cursor >= self.s_limit) {
+            if (self.src_cursor >= self.src_limit) {
                 return done(self);
             }
 
