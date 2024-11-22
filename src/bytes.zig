@@ -15,7 +15,7 @@ pub fn write_u16_le(n: u16, dest: [*]u8) void {
     dest[1] = val;
 }
 
-pub fn trailing_zerors(n: usize) usize {
+pub fn trailing_zeros(n: usize) usize {
     var res: usize = 0;
     var num = n;
 

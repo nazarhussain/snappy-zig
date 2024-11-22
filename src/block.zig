@@ -160,30 +160,30 @@ fn emit_literal(self: *Block, lit_end: usize) void {
     self.dest_cursor += len;
 }
 
-fn extend_match(self: *Block, cand_: usize) usize {
-    assert(cand_ < self.src_cursor);
-    var cand = cand_;
+fn extend_match(self: *Block, candidate_: usize) usize {
+    assert(candidate_ < self.src_cursor);
+    var candidate = candidate_;
 
     while (self.src_cursor + 8 <= self.src.len) {
         const x = bytes.load_32(self.src, self.src_cursor);
-        const y = bytes.load_32(self.src, cand);
+        const y = bytes.load_32(self.src, candidate);
         if (x == y) {
             self.src_cursor += 8;
-            cand += 8;
+            candidate += 8;
         } else {
             const z = x ^ y;
-            self.src_cursor += bytes.trailing_zerors(z) / 8;
-            return cand;
+            self.src_cursor += bytes.trailing_zeros(z) / 8;
+            return candidate;
         }
     }
     // When we have fewer than 8 bytes left in the block, fall back to the
     // slow loop.
-    while (self.src_cursor < self.src.len and self.src[self.src_cursor] == self.src[cand]) {
+    while (self.src_cursor < self.src.len and self.src[self.src_cursor] == self.src[candidate]) {
         self.src_cursor += 1;
-        cand += 1;
+        candidate += 1;
     }
 
-    return cand;
+    return candidate;
 }
 
 fn emit_copy(self: *Block, offset: usize, len_: usize) usize {
