@@ -3,12 +3,42 @@ const block_table = @import("./block_table.zig");
 const bytes = @import("./bytes.zig");
 
 const assert = std.debug.assert;
+const testing = std.testing;
 
-pub const MAX_BLOCK_SIZE = 65536;
+const kb32 = 1024 * 32;
+
+// 32kb block size
+// https://github.com/google/snappy/blob/32ded457c0b1fe78ceb8397632c416568d6714a0/format_description.txt#L79
+pub const MAX_BLOCK_SIZE = kb32;
 
 const INPUT_MARGIN: usize = 16 - 1;
 
 pub const MIN_NON_LITERAL_BLOCK_SIZE: usize = 1 + 1 + INPUT_MARGIN;
+
+const Tag = enum(u8) {
+    Literal = 0b00,
+    Copy1 = 0b01,
+    Copy2 = 0b10,
+    // Compression never actually emits a Copy4 operation and decompression
+    // uses tricks so that we never explicitly do case analysis on the copy
+    // operation type, therefore leading to the fact that we never use Copy4.
+    Copy4 = 0b11,
+};
+
+test "tag literal" {
+    try testing.expectEqual(@intFromEnum(Tag.Literal), 0b00);
+}
+test "tag copy1" {
+    try testing.expectEqual(@intFromEnum(Tag.Copy1), 0b01);
+}
+
+test "tag copy2" {
+    try testing.expectEqual(@intFromEnum(Tag.Copy2), 0b10);
+}
+
+test "tag copy4" {
+    try testing.expectEqual(@intFromEnum(Tag.Copy4), 0b11);
+}
 
 const Block = struct {
     src: []const u8,
@@ -31,7 +61,11 @@ pub fn new_block(src: []const u8, dst: [*]u8, d: usize) Block {
 }
 
 pub fn compress(self: *Block, table: block_table.BlockTable) void {
-    assert(self.src.len >= MIN_NON_LITERAL_BLOCK_SIZE);
+    if (self.src.len < MIN_NON_LITERAL_BLOCK_SIZE) {
+        emit_literal(self, self.src.len);
+        self.dest_cursor += self.src.len;
+        return;
+    }
 
     self.src_cursor += 1;
     self.src_limit -= INPUT_MARGIN;
@@ -78,18 +112,17 @@ pub fn compress(self: *Block, table: block_table.BlockTable) void {
             const base = self.src_cursor;
             self.src_cursor += 4;
 
-            candidate = extend_match(self, candidate + 4);
-
-            if (base < candidate) {
-                return done(self);
+            {
+                candidate = extend_match(self, candidate + 4);
             }
+
+            // if (base < candidate) {
+            //     return done(self);
+            // }
 
             const offset = base - candidate;
             var len = self.src_cursor - base;
-
-            {
-                len = emit_copy(self, offset, len);
-            }
+            len = emit_copy(self, offset, len);
 
             self.next_emit = self.src_cursor;
 
@@ -124,40 +157,83 @@ fn done(self: *Block) void {
     }
 }
 
-const Tag = enum(u8) {
-    Literal = 0b00,
-    Copy1 = 0b01,
-    Copy2 = 0b10,
-    // Compression never actually emits a Copy4 operation and decompression
-    // uses tricks so that we never explicitly do case analysis on the copy
-    // operation type, therefore leading to the fact that we never use Copy4.
-    Copy4 = 0b11,
-};
-
+/// Literals are uncompressed data stored directly in the byte stream.
+/// https://github.com/google/snappy/blob/32ded457c0b1fe78ceb8397632c416568d6714a0/format_description.txt#L48
 fn emit_literal(self: *Block, lit_end: usize) void {
+    std.debug.print("\n{any}, cursor:{}, lit_end:{}\n", .{ self.dest[0..self.dest_cursor], self.dest_cursor, lit_end });
     const lit_start = self.next_emit;
     const len = lit_end - lit_start;
-    const n: u8 = @as(u8, @intCast(len)) - 1;
-    if (n <= 59) {
-        self.dest[self.dest_cursor] = (n << 2) | @intFromEnum(Tag.Literal);
+    const len_1: u8 = @as(u8, @intCast(len)) - 1;
+
+    // For literals up to and including 60 bytes in length, the upper
+    // six bits of the tag byte contain (len-1). The literal follows
+    // immediately thereafter in the byte stream.
+    if (len <= 60) {
+        self.dest[self.dest_cursor] = (len_1 << 2) | @intFromEnum(Tag.Literal);
         self.dest_cursor += 1;
-        if (len <= 16 and lit_start + 16 <= self.src.len) {
-            @memcpy(self.dest[self.dest_cursor..(self.dest_cursor + 16)], self.src[lit_start..(lit_start + 16)]);
-            self.dest_cursor += len;
-            return;
-        }
-    } else if (n < 256) {
-        self.dest[self.dest_cursor] = (60 << 2) | @intFromEnum(Tag.Literal);
-        self.dest[self.dest_cursor + 1] = n;
-        self.dest_cursor += 2;
-    } else {
-        self.dest[self.dest_cursor] = (61 << 2) | (Tag.Literal);
-        bytes.write_u16_le(n, self.dest[self.dest_cursor..]);
-        self.dest_cursor += 3;
+    }
+    // For longer literals, the (len-1) value is stored after the tag byte,
+    // little-endian. The upper six bits of the tag byte describe how
+    // many bytes are used for the length; 60, 61, 62 or 63 for
+    // 1-4 bytes, respectively. The literal itself follows after the
+    // length.
+    else {
+        const length_byte_size = bytes.get_byte_size(len_1);
+        self.dest[self.dest_cursor] = ((59 + length_byte_size) << 2) | @intFromEnum(Tag.Literal);
+        bytes.write_16_int_le(len_1, self.dest[(self.dest_cursor + 1)..]);
+        self.dest_cursor += (length_byte_size + 1);
     }
 
-    @memcpy(self.dest[self.dest_cursor..(self.dest_cursor + len)], self.src[lit_start..(lit_start + len)]);
+    @memcpy(self.dest[self.dest_cursor..(self.dest_cursor + len)], self.src[lit_start..lit_end]);
     self.dest_cursor += len;
+}
+
+fn emit_copy(self: *Block, offset: usize, len: usize) usize {
+    // Offset can not cross the max block size
+    assert(1 <= offset and offset <= MAX_BLOCK_SIZE);
+
+    // Length can not cross the max block size
+    assert(4 <= len and len <= MAX_BLOCK_SIZE);
+
+    // These elements can encode lengths between [4..11] bytes and offsets
+    // between [0..2047] bytes.
+    // https://github.com/google/snappy/blob/32ded457c0b1fe78ceb8397632c416568d6714a0/format_description.txt#L91-L92
+    if ((4 <= len and len <= 11) and (0 <= offset and offset <= 2047)) {
+        emit_copy1(self, offset, len);
+        return 0;
+    }
+
+    // https://github.com/google/snappy/blob/32ded457c0b1fe78ceb8397632c416568d6714a0/format_description.txt#L100-L101
+    if ((4 <= len and len <= 64) and (0 <= offset and offset <= 65535)) {
+        emit_copy2(self, offset, len);
+        return 0;
+    }
+
+    // https://github.com/google/snappy/blob/32ded457c0b1fe78ceb8397632c416568d6714a0/format_description.txt#L108
+    if ((4 <= len and len <= 64) and offset > 65535) {
+        emit_copy4(self, offset, len);
+        return 0;
+    }
+
+    return len;
+}
+
+fn emit_copy1(self: *Block, offset: usize, len: usize) void {
+    self.dest[self.dest_cursor] = @intCast(((offset >> 8) << 5) | (len - 4) << 2 | @intFromEnum(Tag.Copy1));
+    self.dest[self.dest_cursor + 1] = @intCast(offset & 0xFF);
+    self.dest_cursor += 2;
+}
+
+fn emit_copy2(self: *Block, offset: usize, len: usize) void {
+    self.dest[self.dest_cursor] = @intCast((len - 1) << 2 | @intFromEnum(Tag.Copy2));
+    bytes.write_16_int_le(offset, self.dest[(self.dest_cursor + 1)..][0..]);
+    self.dest_cursor += 3;
+}
+
+fn emit_copy4(self: *Block, offset: usize, len: usize) void {
+    self.dest[self.dest_cursor] = @intCast((len - 1) << 2 | @intFromEnum(Tag.Copy2));
+    bytes.write_32_int_le(offset, self.dest[(self.dest_cursor + 1)..][0..]);
+    self.dest_cursor += 5;
 }
 
 fn extend_match(self: *Block, candidate_: usize) usize {
@@ -184,51 +260,4 @@ fn extend_match(self: *Block, candidate_: usize) usize {
     }
 
     return candidate;
-}
-
-fn emit_copy(self: *Block, offset: usize, len_: usize) usize {
-    var len = len_;
-
-    assert(1 <= offset and offset <= 65535);
-    // Copy operations only allow lengths up to 64, but we'll allow bigger
-    // lengths and emit as many operations as we need.
-    //
-    // N.B. Since our block size is 64KB, we never actually emit a copy 4
-    // operation.
-    assert(4 <= len and len <= 65535);
-
-    // Emit copy 2 operations until we don't have to.
-    // We check on 68 here and emit a shorter copy than 64 below because
-    // it is cheaper to, e.g., encode a length 67 copy as a length 60
-    // copy 2 followed by a length 7 copy 1 than to encode it as a length
-    // 64 copy 2 followed by a length 3 copy 2. They key here is that a
-    // copy 1 operation requires at least length 4 which forces a length 3
-    // copy to use a copy 2 operation.
-    while (len >= 68) {
-        emit_copy2(self, offset, 64);
-        len -= 64;
-    }
-    if (len > 64) {
-        emit_copy2(self, offset, 60);
-        len -= 60;
-    }
-    // If we can squeeze the last copy into a copy 1 operation, do it.
-    if (len <= 11 and offset <= 2047) {
-        self.dest[self.dest_cursor] = @intCast(((offset >> 8) << 5) | ((len - 4) << 2) | @intFromEnum(Tag.Copy1));
-        self.dest[self.dest_cursor + 1] = @intCast(offset);
-        self.dest_cursor += 2;
-    } else {
-        emit_copy2(self, offset, len);
-    }
-
-    return len;
-}
-
-fn emit_copy2(self: *Block, offset: usize, len: usize) void {
-    assert(1 <= offset and offset <= 65535);
-    assert(1 <= len and len <= 64);
-
-    self.dest[self.dest_cursor] = @intCast((len - 1) << 2 | @intFromEnum(Tag.Copy2));
-    bytes.write_u16_le(@intCast(offset), self.dest[self.dest_cursor + 1 ..]);
-    self.dest_cursor += 3;
 }
