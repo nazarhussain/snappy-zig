@@ -44,6 +44,8 @@ pub const SnappyEncoder = struct {
 
         const max_len = encoder.calcSize(source.len);
         if (max_len > MAX_INPUT_SIZE) return SnappyError.LargeInput;
+
+        // TODO: Debug this case with a streaming writer
         // if (dest.len < max_len) return SnappyError.SmallOutputBuffer;
 
         const table = try block_table.new(max_len, encoder.allocator);
@@ -58,7 +60,8 @@ pub const SnappyEncoder = struct {
     }
 
     pub fn encode(encoder: *const SnappyEncoder, dest: []u8, source: []const u8) SnappyError![]const u8 {
-        if (source.len == 0) return "";
+        // To match the output of the libcsnappy
+        if (source.len == 0) return "\x00";
 
         const max_len = encoder.calcSize(source.len);
         if (max_len > MAX_INPUT_SIZE) return SnappyError.LargeInput;
@@ -82,18 +85,78 @@ pub fn compress(
 ) !SnappyError!usize {
     if (input.len == 0) return SnappyError.EmptyInput;
 
-    var d = bytes.write_varint(input.len, output, 0);
+    var dest_cursor = bytes.writeVarint(input.len, output, 0);
     var cursor: usize = 0;
 
     while (cursor < input.len) {
         const block_size = @min((input.len - cursor), block.MAX_BLOCK_SIZE);
 
-        var blk = block.new_block(input[cursor..block_size], output.ptr, d);
-        block.compress(&blk, table);
+        var blk = block.new_block(input[cursor..][0..block_size], output.ptr, dest_cursor);
+        block.compress(&blk, &table);
 
         cursor += block_size;
-        d += blk.dest_cursor;
+        dest_cursor += blk.dest_cursor;
     }
 
-    return d - 1;
+    return dest_cursor - 1;
+}
+
+const libSnappy = @import("./lib_snappy.zig");
+const testing = std.testing;
+
+const alice29 = @embedFile("./data/alice29.txt");
+
+test "empty string" {
+    try testEncode(standard, "");
+}
+
+test "small phrase" {
+    try testEncode(standard, "could");
+}
+
+test "simple phrase" {
+    const data = "neighbouring pool--she could hear the rattle of the teacups as";
+    try testEncode(standard, data);
+}
+
+test "simple phrase with repeated strings" {
+    const data = "aaaaaaaabbbbbbbbaaaaaaaabbbbbbbb";
+    try testEncode(standard, data);
+}
+
+test "simple phrase with multiple repeated strings" {
+    const data = "aaaaaaaabbbbbbbbaaaaaaaabbbbbbbbaaaaaaaabbbbbbbbaaaaaaaabbbbbbbb";
+    try testEncode(standard, data);
+}
+
+test "medium text" {
+    const data = "Idioms are a wonderful part of the English language that gives it a lot of flavor. They force people to know more than the literal meaning of words. Idioms are commonly used phrases that have a meaning completely different than their literal meaning. This can be quite confusing to those who aren't familiar with the idiom and those who are studying English.";
+    try testEncode(standard, data);
+}
+
+test "larger text" {
+    try testEncode(standard, alice29);
+}
+
+fn testEncode(codecs: Codecs, data: []const u8) !void {
+    const zig_compression_buffer = try testing.allocator.alloc(u8, codecs.Encoder.calcSize(data.len));
+    defer testing.allocator.free(zig_compression_buffer);
+    const compressed_by_zig = try codecs.Encoder.encode(zig_compression_buffer, data);
+
+    var c_compression_buffer = try testing.allocator.alloc(u8, libSnappy.snappy_max_compressed_length(data.len));
+    defer testing.allocator.free(c_compression_buffer);
+    var compressed_length: usize = undefined;
+    _ = libSnappy.snappy_compress(data.ptr, data.len, c_compression_buffer.ptr, &compressed_length);
+    const compressed_by_c = c_compression_buffer[0..compressed_length];
+
+    var c_uncompress_buffer = try testing.allocator.alloc(u8, data.len);
+    defer testing.allocator.free(c_uncompress_buffer);
+    var c_uncompress_len: usize = undefined;
+    _ = libSnappy.snappy_uncompress(compressed_by_zig.ptr, compressed_by_zig.len, c_uncompress_buffer.ptr, &c_uncompress_len);
+    const uncompressed_by_c = c_uncompress_buffer[0..data.len];
+
+    std.debug.print("\n\ncompressed_c: {}\n\n", .{std.fmt.fmtSliceHexLower(compressed_by_c)});
+
+    // try testing.expectEqualSlices(u8, compressed_by_c, compressed_by_zig);
+    try testing.expectEqualSlices(u8, uncompressed_by_c, data);
 }

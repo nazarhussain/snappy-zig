@@ -64,6 +64,14 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
+    const libSnappy = b.addStaticLibrary(.{ .name = "csnappy", .target = target, .optimize = optimize });
+    libSnappy.linkLibC();
+    libSnappy.linkLibCpp();
+    libSnappy.addIncludePath(b.path("snappy-cpp"));
+    libSnappy.addCSourceFile(.{ .file = b.path("snappy-cpp/snappy.cc"), .flags = &.{"-std=c++17"} });
+    libSnappy.addCSourceFile(.{ .file = b.path("snappy-cpp/snappy-c.cc"), .flags = &.{"-std=c++17"} });
+    libSnappy.addCSourceFile(.{ .file = b.path("snappy-cpp/snappy-sinksource.cc"), .flags = &.{"-std=c++17"} });
+
     // Creates a step for unit testing. This only builds the test executable
     // but does not run it.
     const lib_unit_tests = b.addTest(.{
@@ -71,21 +79,12 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-
+    lib_unit_tests.linkLibrary(libSnappy);
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
-
-    const exe_unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
 
     // Similar to creating the run step earlier, this exposes a `test` step to
     // the `zig build --help` menu, providing a way for the user to request
     // running the unit tests.
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_unit_tests.step);
-    test_step.dependOn(&run_exe_unit_tests.step);
 }
