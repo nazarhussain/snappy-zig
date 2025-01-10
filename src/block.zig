@@ -6,12 +6,8 @@ const print = std.debug.print;
 const assert = std.debug.assert;
 const testing = std.testing;
 
-fn kb(val: comptime_int) comptime_int {
-    return 1024 * val;
-}
-
 // https://github.com/google/snappy/blob/32ded457c0b1fe78ceb8397632c416568d6714a0/format_description.txt#L79
-pub const MAX_BLOCK_SIZE = kb(32);
+pub const MAX_BLOCK_SIZE = 1 << 16;
 
 const INPUT_MARGIN: usize = 16 - 1;
 
@@ -172,7 +168,7 @@ fn finishBlock(self: *Block) void {
 // A literal is uncompressed data stored directly in the byte stream.
 // https://github.com/google/snappy/blob/32ded457c0b1fe78ceb8397632c416568d6714a0/format_description.txt#L48
 //--------------------------------------------------------------------
-fn emitLiteral(self: *Block, lit_end: usize) void {
+pub fn emitLiteral(self: *Block, lit_end: usize) void {
     const lit_start = self.next_emit;
     const length = lit_end - lit_start;
 

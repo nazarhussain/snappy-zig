@@ -11,7 +11,7 @@ const STREAM_BODY = "sNaPpY";
 
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 
-const SnappyError = error{ EmptyInput, LargeInput, SmallOutputBuffer, Encoding, OutOfMemory, Overflow };
+const SnappyError = error{ LargeInput, SmallOutputBuffer, Encoding, OutOfMemory, Overflow };
 
 pub const Codecs = struct {
     Encoder: SnappyEncoder,
@@ -60,17 +60,11 @@ pub const SnappyEncoder = struct {
     }
 
     pub fn encode(encoder: *const SnappyEncoder, dest: []u8, source: []const u8) SnappyError![]const u8 {
-        // To match the output of the libcsnappy
-        if (source.len == 0) return "\x00";
-
         const max_len = encoder.calcSize(source.len);
         if (max_len > MAX_INPUT_SIZE) return SnappyError.LargeInput;
         if (dest.len < max_len) return SnappyError.SmallOutputBuffer;
 
-        const table = try block_table.new(max_len, encoder.allocator);
-        defer table.free(encoder.allocator);
-
-        if (try compress(source, dest, table)) |size| {
+        if (try compress(source, dest, encoder.allocator)) |size| {
             return dest[0..size];
         } else |_| {
             return SnappyError.Encoding;
@@ -81,24 +75,36 @@ pub const SnappyEncoder = struct {
 pub fn compress(
     input: []const u8,
     output: []u8,
-    table: block_table.BlockTable,
+    allocator: std.mem.Allocator,
 ) !SnappyError!usize {
-    if (input.len == 0) return SnappyError.EmptyInput;
+    if (input.len == 0) {
+        // Set the first byte as the size of the input
+        output[0] = 0;
 
-    var dest_cursor = bytes.writeVarint(input.len, output, 0);
-    var cursor: usize = 0;
-
-    while (cursor < input.len) {
-        const block_size = @min((input.len - cursor), block.MAX_BLOCK_SIZE);
-
-        var blk = block.new_block(input[cursor..][0..block_size], output.ptr, dest_cursor);
-        block.compress(&blk, &table);
-
-        cursor += block_size;
-        dest_cursor += blk.dest_cursor;
+        // Return the size of the output
+        return 1;
     }
 
-    return dest_cursor - 1;
+    var dest_cursor = bytes.writeVarint(input.len, output, 0);
+    var src_cursor: usize = 0;
+
+    while (src_cursor < input.len) {
+        const block_size = @min((input.len - src_cursor), block.MAX_BLOCK_SIZE);
+        var blk = block.new_block(input[src_cursor..][0..block_size], output.ptr, dest_cursor);
+
+        if (blk.src.len < block.MIN_NON_LITERAL_BLOCK_SIZE) {
+            block.emitLiteral(&blk, block_size);
+        } else {
+            const table = try block_table.new(blk.src.len, allocator);
+            block.compress(&blk, &table);
+            table.free(allocator);
+        }
+
+        src_cursor += block_size;
+        dest_cursor = blk.dest_cursor;
+    }
+
+    return dest_cursor;
 }
 
 const libSnappy = @import("./lib_snappy.zig");
@@ -143,19 +149,17 @@ fn testEncode(codecs: Codecs, data: []const u8) !void {
     defer testing.allocator.free(zig_compression_buffer);
     const compressed_by_zig = try codecs.Encoder.encode(zig_compression_buffer, data);
 
-    var c_compression_buffer = try testing.allocator.alloc(u8, libSnappy.snappy_max_compressed_length(data.len));
-    defer testing.allocator.free(c_compression_buffer);
-    var compressed_length: usize = undefined;
-    _ = libSnappy.snappy_compress(data.ptr, data.len, c_compression_buffer.ptr, &compressed_length);
-    const compressed_by_c = c_compression_buffer[0..compressed_length];
+    // var c_compression_buffer = try testing.allocator.alloc(u8, libSnappy.snappy_max_compressed_length(data.len));
+    // defer testing.allocator.free(c_compression_buffer);
+    // var compressed_length: usize = undefined;
+    // _ = libSnappy.snappy_compress(data.ptr, data.len, c_compression_buffer.ptr, &compressed_length);
+    // const compressed_by_c = c_compression_buffer[0..compressed_length];
 
     var c_uncompress_buffer = try testing.allocator.alloc(u8, data.len);
     defer testing.allocator.free(c_uncompress_buffer);
     var c_uncompress_len: usize = undefined;
     _ = libSnappy.snappy_uncompress(compressed_by_zig.ptr, compressed_by_zig.len, c_uncompress_buffer.ptr, &c_uncompress_len);
     const uncompressed_by_c = c_uncompress_buffer[0..data.len];
-
-    std.debug.print("\n\ncompressed_c: {}\n\n", .{std.fmt.fmtSliceHexLower(compressed_by_c)});
 
     // try testing.expectEqualSlices(u8, compressed_by_c, compressed_by_zig);
     try testing.expectEqualSlices(u8, uncompressed_by_c, data);
