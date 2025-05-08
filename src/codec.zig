@@ -149,18 +149,27 @@ fn testEncode(codecs: Codecs, data: []const u8) !void {
     defer testing.allocator.free(zig_compression_buffer);
     const compressed_by_zig = try codecs.Encoder.encode(zig_compression_buffer, data);
 
-    // var c_compression_buffer = try testing.allocator.alloc(u8, libSnappy.snappy_max_compressed_length(data.len));
-    // defer testing.allocator.free(c_compression_buffer);
-    // var compressed_length: usize = undefined;
-    // _ = libSnappy.snappy_compress(data.ptr, data.len, c_compression_buffer.ptr, &compressed_length);
-    // const compressed_by_c = c_compression_buffer[0..compressed_length];
+    try testZigEncodeLibDecode(data, compressed_by_zig);
+    // try testMatchingEncode(data, compressed_by_zig);
+}
 
+fn testZigEncodeLibDecode(data: []const u8, compressed: []const u8) !void {
     var c_uncompress_buffer = try testing.allocator.alloc(u8, data.len);
     defer testing.allocator.free(c_uncompress_buffer);
     var c_uncompress_len: usize = undefined;
-    _ = libSnappy.snappy_uncompress(compressed_by_zig.ptr, compressed_by_zig.len, c_uncompress_buffer.ptr, &c_uncompress_len);
+    _ = libSnappy.snappy_uncompress(compressed.ptr, compressed.len, c_uncompress_buffer.ptr, &c_uncompress_len);
     const uncompressed_by_c = c_uncompress_buffer[0..data.len];
 
-    // try testing.expectEqualSlices(u8, compressed_by_c, compressed_by_zig);
     try testing.expectEqualSlices(u8, uncompressed_by_c, data);
+}
+
+fn testMatchingEncode(data: []const u8, compressed: []const u8) !void {
+    var c_compression_buffer = try testing.allocator.alloc(u8, libSnappy.snappy_max_compressed_length(data.len));
+    defer testing.allocator.free(c_compression_buffer);
+    var compressed_length: usize = undefined;
+    _ = libSnappy.snappy_compress(data.ptr, data.len, c_compression_buffer.ptr, &compressed_length);
+    const compressed_by_c = c_compression_buffer[0..compressed_length];
+
+    try testing.expectEqual(compressed.len <= compressed_by_c.len, true);
+    try testing.expectEqualSlices(u8, compressed_by_c, compressed);
 }
